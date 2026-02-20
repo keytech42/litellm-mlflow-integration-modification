@@ -262,16 +262,60 @@ class MlflowLogger(CustomLogger):
                 start_time_ns=start_time_ns,
             )
         else:
-            return self._client.start_trace(
+            # Build tags dict with request_tags
+            tags = self._transform_tag_list_to_dict(attributes.get("request_tags", []))
+
+            # Extract and add Claude Code session ID
+            # Try multiple locations where metadata might be
+            metadata = kwargs.get("metadata", {})
+            if not metadata:
+                # Try litellm_params.metadata
+                litellm_params = kwargs.get("litellm_params", {})
+                metadata = litellm_params.get("metadata", {})
+
+            verbose_logger.debug(f"MLflow: metadata = {metadata}")
+            verbose_logger.debug(f"MLflow: metadata type = {type(metadata)}")
+
+            # Also check standard_logging_object
+            standard_obj = kwargs.get("standard_logging_object")
+            if standard_obj:
+                standard_metadata = standard_obj.get("metadata", {})
+                verbose_logger.debug(f"MLflow: standard_logging_object.metadata = {standard_metadata}")
+                if not metadata and standard_metadata:
+                    metadata = standard_metadata
+
+            if user_id := metadata.get("user_id") if isinstance(metadata, dict) else None:
+                verbose_logger.debug(f"MLflow: Found user_id = {user_id}")
+            else:
+                verbose_logger.debug("MLflow: No user_id found in metadata")
+
+            verbose_logger.debug(f"MLflow: Final tags = {tags}")
+
+            trace = self._client.start_trace(
                 name=span_name,
                 span_type=span_type,
                 inputs=inputs,
                 attributes=attributes,
-                tags=self._transform_tag_list_to_dict(
-                    attributes.get("request_tags", [])
-                ),
+                tags=tags,
                 start_time_ns=start_time_ns,
             )
+
+            # Set metadata using InMemoryTraceManager directly (low-level approach)
+            if user_id := metadata.get("user_id") if isinstance(metadata, dict) else None:
+                session_id = user_id.split("session_")[-1] if "session_" in user_id else None
+                if session_id:
+                    try:
+                        from mlflow.tracing.trace_manager import InMemoryTraceManager
+
+                        manager = InMemoryTraceManager.get_instance()
+                        manager.set_trace_metadata(
+                            trace_id=trace.request_id, key="mlflow.trace.session", value=session_id
+                        )
+                        verbose_logger.debug("MLflow: Successfully set metadata via InMemoryTraceManager")
+                    except Exception as e:
+                        verbose_logger.debug(f"MLflow: Failed to set metadata via InMemoryTraceManager: {e}")
+
+            return trace
 
     def _transform_tag_list_to_dict(self, tag_list: list) -> dict:
         """
